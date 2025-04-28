@@ -16,6 +16,11 @@ import (
 	"github.com/joho/godotenv"
 )
 
+type SpotifyClient struct {
+	client      *http.Client
+	AccessToken string
+}
+
 type TokenResponse struct {
 	AccessToken string `json:"access_token"`
 	TokenType   string `json:"bearer"`
@@ -56,6 +61,74 @@ type GetTracksFromPlaylistResponse struct {
 			} `json:"track"`
 		} `json:"items"`
 	} `json:"tracks"`
+}
+
+func NewSpotifyClient(accessToken string) *SpotifyClient {
+	return &SpotifyClient{
+		client:      &http.Client{},
+		AccessToken: accessToken,
+	}
+}
+
+func (c *SpotifyClient) makeRequest(method, endpoint string, body io.Reader) (*http.Response, error) {
+	url := "https://api.spotify.com/v1" + endpoint
+
+	// Create the HTTP request
+	req, err := http.NewRequest(method, url, body)
+	if err != nil {
+		return nil, err
+	}
+
+	// Set the headers
+	req.Header.Set("Authorization", "Bearer "+c.AccessToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	// Make the request using HTTP client
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+	return resp, nil
+}
+
+func (c *SpotifyClient) callMakeRequestAndUnmarshal(method, endpoint string, body io.Reader, result any) error {
+
+	// Make the request
+	resp, err := c.makeRequest(method, endpoint, body)
+	if err != nil {
+		return err
+	}
+
+	defer resp.Body.Close()
+
+	// Read the response body
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Unmarshal JSON into the result struct
+	err = json.Unmarshal(responseBody, &result)
+	if err != nil {
+		log.Fatal("Error unmarshalling response %v", err)
+	}
+	return nil
+}
+
+func getUserInput(prompt string) (string, error) {
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Print(prompt)
+	input, err := reader.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(input), nil
 }
 
 func getToken(client *http.Client) string {
@@ -118,58 +191,35 @@ func getToken(client *http.Client) string {
 	return tokenResponse.AccessToken
 }
 
-func searchForTracks(client *http.Client, accessToken string) string {
+func (c *SpotifyClient) SearchForTracks() (string, error) {
 
-	// Ask user for search input
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Print("Enter track to search: ")
-	userInput, _ := reader.ReadString('\n')
-	userInput = strings.TrimSpace(userInput)
+	userInput, err := getUserInput("Enter track to search: ")
+	if err != nil {
+		return "", err
+	}
 
-	// Create the search URL
 	params := url.Values{}
 	params.Set("q", userInput)
 	params.Set("type", "track")
-
-	// Initializing the required parameters to perform a search
 	method := "GET"
-	url := "https://api.spotify.com/v1/search?" + params.Encode()
-
-	// Creating the request object
-	req, err := http.NewRequest(method, url, nil)
-
-	// Set headers
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-
-	// Make a search request to the Spotify API
-	resp, err := client.Do(req)
-	if err != nil {
-		panic(err)
-	}
-	defer resp.Body.Close()
-
-	// Read the search response body
-	responseBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Fatal(err)
-	}
+	endpoint := "/search?" + params.Encode()
 
 	// Unmarshall the body into the struct you created
 	var searchTracksResponse GetAllTracksResponse
-	err = json.Unmarshal(responseBody, &searchTracksResponse)
+	err = c.callMakeRequestAndUnmarshal(method, endpoint, nil, &searchTracksResponse)
 	if err != nil {
-		log.Fatal("Error unmarshalling search tracks response:", err)
+		return "", err
 	}
 
-	// Print the results
 	for i, track := range searchTracksResponse.Tracks.Items {
 		fmt.Printf("[%d] Track: %s by %s\n", i, track.Name, track.Artists[0].Name)
 	}
 
 	// Get index of track from search results - select which track you want
-	fmt.Print("Enter the index of the playlist you want: ")
-	trackIDInput, _ := reader.ReadString('\n')
-	trackIDInput = strings.TrimSpace(trackIDInput)
+	trackIDInput, err := getUserInput("Enter the index of the playlist you want: ")
+	if err != nil {
+		return "", err // Which format of error is better?
+	}
 
 	trackIndex, err := strconv.Atoi(trackIDInput)
 	if err != nil {
@@ -180,46 +230,23 @@ func searchForTracks(client *http.Client, accessToken string) string {
 		log.Fatal("Index out of bounds")
 	}
 	requestedTrack := searchTracksResponse.Tracks.Items[trackIndex]
-	return requestedTrack.URI
+	return requestedTrack.URI, nil
 }
 
 // Get an existing playlist I created in Spotify
-func getAllPlaylists(client *http.Client, accessToken string) []Playlist {
+func (c *SpotifyClient) GetAllPlaylists() ([]Playlist, error) {
 
 	// Initializing the required parameters to get all my playlists
 	method := "GET"
-	url := "https://api.spotify.com/v1/users/ragyakaul/playlists"
-
-	// Creating the request object
-	req, err := http.NewRequest(method, url, nil)
-	if err != nil {
-		log.Fatal("Error creating request:", err)
-	}
-
-	// Set headers
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-
-	// Make a request to get your playlists from the Spotify API
-	resp, err := client.Do(req)
-	if err != nil {
-		panic(err)
-	}
-	defer resp.Body.Close()
-
-	// Read the search response body
-	responseBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Fatal(err)
-	}
+	endpoint := "/users/ragyakaul/playlists"
 
 	// Unmarshall the body into the struct you created
 	var getAllPlaylistsResponse GetAllPlaylistsResponse
-	err = json.Unmarshal(responseBody, &getAllPlaylistsResponse)
+	err := c.callMakeRequestAndUnmarshal(method, endpoint, nil, &getAllPlaylistsResponse)
 	if err != nil {
-		log.Fatal("Error unmarshalling get all playlists response:", err)
+		return nil, err
 	}
-
-	return getAllPlaylistsResponse.Items
+	return getAllPlaylistsResponse.Items, nil
 }
 
 func selectPlaylist(playlists []Playlist) string {
@@ -229,10 +256,7 @@ func selectPlaylist(playlists []Playlist) string {
 		fmt.Printf("[%d] Playlist Name: %s Playlist ID: %s\n", i, item.Name, item.ID)
 	}
 
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Print("Enter the index of the playlist you want: ")
-	userInput, _ := reader.ReadString('\n')
-	userInput = strings.TrimSpace(userInput)
+	userInput, err := getUserInput("Enter the index of the playlist you want: ")
 
 	playlistIndex, err := strconv.Atoi(userInput)
 	if err != nil {
@@ -246,91 +270,32 @@ func selectPlaylist(playlists []Playlist) string {
 	return requestedPlaylist.ID
 }
 
-func addTrackToPlaylist(client *http.Client, accessToken string, trackURI string, playlistID string) {
+func (c *SpotifyClient) AddTrackToPlaylist(trackURI string, playlistID string) {
 
 	// Initializing the required parameters to add track to my playlist
 	method := "POST"
-	url := fmt.Sprintf("https://api.spotify.com/v1/playlists/%s/tracks", playlistID)
+	endpoint := fmt.Sprintf("/playlists/%s/tracks", playlistID)
 
 	reqBody := fmt.Sprintf(`{"uris": ["%s"]}`, trackURI)
 	bodyReader := strings.NewReader(reqBody)
 
 	// Creating the request object
-	req, err := http.NewRequest(method, url, bodyReader)
-	if err != nil {
-		log.Fatal("Error creating request:", err)
-	}
-	fmt.Println("URL: ", url)
-
-	// Set headers
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("Content-Type", "application/json")
-
-	// Make a req to add track to your playlist using the Spotify API
-	resp, err := client.Do(req)
-	if err != nil {
-		panic(err)
-	}
-	defer resp.Body.Close()
-
-	statusResponse := resp.StatusCode
-	if statusResponse != 201 {
-		respBody, _ := io.ReadAll(resp.Body)
-		fmt.Println(string(respBody))
-		log.Fatal("Failed to add track to playlists")
-
-	}
+	c.makeRequest(method, endpoint, bodyReader)
 }
 
-func getTrackFromPlaylist(client *http.Client, accessToken string, playlistID string) string {
+func (c *SpotifyClient) GetTrackFromPlaylist(playlistID string) string {
 
-	// Initializing the required parameters to get a track from my playlist
 	method := "GET"
-	url := fmt.Sprintf("https://api.spotify.com/v1/playlists/%s", playlistID)
-
-	// Creating the request object
-	req, err := http.NewRequest(method, url, nil)
-	if err != nil {
-		log.Fatal("Error creating request:", err)
-	}
-
-	// Set headers
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		panic(err)
-	}
-	defer resp.Body.Close()
-
-	// Read the search response body
-	responseBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	statusResponse := resp.StatusCode
-	if statusResponse != 200 {
-		respBody, _ := io.ReadAll(resp.Body)
-		fmt.Println(string(respBody))
-		log.Fatal("Failed to get track from playlist")
-	}
+	endpoint := fmt.Sprintf("/playlists/%s", playlistID)
 
 	var getTracksFromPlaylistResponse GetTracksFromPlaylistResponse
-	err = json.Unmarshal(responseBody, &getTracksFromPlaylistResponse)
-	if err != nil {
-		log.Fatal("Error unmarshalling get track from playlist response")
-	}
+	err := c.callMakeRequestAndUnmarshal(method, endpoint, nil, &getTracksFromPlaylistResponse)
 
 	for i, item := range getTracksFromPlaylistResponse.Tracks.Items {
 		fmt.Printf("[%d] Track Name: %s Artist: %s\n", i, item.Track.Name, item.Track.Artists[0].Name)
 	}
 
-	fmt.Print("Enter the index of the track you want: ")
-	reader := bufio.NewReader(os.Stdin)
-	index, _ := reader.ReadString('\n')
-	index = strings.TrimSpace(index)
+	index, err := getUserInput("Enter the index of the track you want: ")
 	indexInt, err := strconv.Atoi(index)
 	if err != nil {
 		log.Fatal(err)
@@ -341,44 +306,18 @@ func getTrackFromPlaylist(client *http.Client, accessToken string, playlistID st
 	}
 	requestedTrack := getTracksFromPlaylistResponse.Tracks.Items[indexInt]
 	return requestedTrack.Track.URI
-
 }
 
-func removeTrackFromPlaylist(client *http.Client, accessToken string, playlistID string, trackURI string) {
+func (c *SpotifyClient) RemoveTrackFromPlaylist(playlistID string, trackURI string) {
 
 	// Initializing the required parameters to add track to my playlist
 	method := "DELETE"
-	url := fmt.Sprintf("https://api.spotify.com/v1/playlists/%s/tracks", playlistID)
+	endpoint := fmt.Sprintf("/playlists/%s/tracks", playlistID)
 
 	reqBody := fmt.Sprintf(`{"tracks":[{"uri": "%s"}]}`, trackURI)
 	bodyReader := strings.NewReader(reqBody)
 
-	// Creating the request object
-	req, err := http.NewRequest(method, url, bodyReader)
-	if err != nil {
-		log.Fatal("Error creating request:", err)
-	}
-	fmt.Println("URL: ", url)
-
-	// Set headers
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("Content-Type", "application/json")
-
-	// Make a req to add track to your playlist using the Spotify API
-	resp, err := client.Do(req)
-	if err != nil {
-		panic(err)
-	}
-	defer resp.Body.Close()
-
-	fmt.Println(trackURI)
-	statusResponse := resp.StatusCode
-	if statusResponse != 200 {
-		respBody, _ := io.ReadAll(resp.Body)
-		fmt.Println(string(respBody))
-		log.Fatal("Failed to delete track from playlist")
-	}
-
+	c.makeRequest(method, endpoint, bodyReader)
 }
 
 func main() {
@@ -386,22 +325,30 @@ func main() {
 
 	accessToken := getToken(&client)
 
-	playlists := getAllPlaylists(&client, accessToken)
+	spotifyClient := NewSpotifyClient(accessToken)
+
+	playlists, err := spotifyClient.GetAllPlaylists()
+	if err != nil {
+		return
+	}
 
 	playlistID := selectPlaylist(playlists)
 
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Println("Do you want to add or remove a track from your playlist?")
-	actionInput, _ := reader.ReadString('\n')
-	actionInput = strings.TrimSpace(actionInput)
+	actionInput, err := getUserInput("Do you want to add or remove a track from your playlist?")
+	if err != nil {
+		return
+	}
 
 	if actionInput == "add" {
-		trackURI := searchForTracks(&client, accessToken)
-		addTrackToPlaylist(&client, accessToken, trackURI, playlistID)
+		trackURI, err := spotifyClient.SearchForTracks()
+		if err != nil {
+			return
+		}
+		spotifyClient.AddTrackToPlaylist(trackURI, playlistID)
 
 	} else if actionInput == "remove" {
-		trackURI := getTrackFromPlaylist(&client, accessToken, playlistID)
-		removeTrackFromPlaylist(&client, accessToken, playlistID, trackURI)
+		trackURI := spotifyClient.GetTrackFromPlaylist(playlistID)
+		spotifyClient.RemoveTrackFromPlaylist(playlistID, trackURI)
 	}
 
 }
